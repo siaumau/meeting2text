@@ -27,7 +27,9 @@ Groq 原生支援的格式（不需轉檔，前提是 ≤25MB）：
 
 ### 下載直接使用（Windows）
 
-從 [Releases](../../releases) 下載 `Meeting2Text.exe`，雙擊執行即可，不需要安裝 Python。
+從 [Releases](../../releases) 下載 `Meeting2Text-vX.X.X-win.zip`，解壓縮後執行資料夾內的 `Meeting2Text.exe` 即可，不需要安裝 Python。
+
+> 從 v1.0.3 起改為「資料夾」形式發布（而非單一 exe），因為單一自解壓 exe + UPX 壓縮很容易被 Windows Defender / SmartScreen 誤判為病毒（false positive）。解壓後請保留整個資料夾（`.exe` 需要跟旁邊的 `_internal` 資料夾一起才能執行），不要只複製 `Meeting2Text.exe` 單一檔案。
 
 1. 第一次啟動會要求輸入 Groq API Key（於 [console.groq.com](https://console.groq.com) 免費申請），Key 會存在程式旁的 `.env`。
 2. 點選「選擇音檔」→ 選語言（可自動偵測）→「開始轉換」。
@@ -48,6 +50,16 @@ GROQ_API_KEY=你的_groq_api_key
 ```
 
 也需要安裝 [ffmpeg](https://ffmpeg.org/) 並確保在系統 PATH 中（打包好的 exe 已內建 ffmpeg，不需另外安裝）。
+
+## 執行檔被 Windows 判定為病毒怎麼辦
+
+PyInstaller 打包出來的「單一自解壓 exe」+ UPX 壓縮，是 Windows Defender / SmartScreen 最容易誤報（false positive）的組合：exe 執行時會把內容解壓到暫存目錄再啟動，這個行為模式跟部分真的惡意程式類似，容易被啟發式掃描誤抓。ffmpeg.exe 本身沒有數位簽章，也常被單獨誤判。
+
+因此 v1.0.3 起改成「資料夾」發布方式（`--onedir`）並關閉 UPX 壓縮，不再是單一 exe，可大幅降低誤報機率。若你打包後仍被誤判：
+
+- 用 [VirusTotal](https://www.virustotal.com/) 上傳確認，若只有零星一兩家小廠商引擎報、其餘大廠（Defender、Kaspersky、BitDefender 等）都乾淨，基本可判定是誤報。
+- 可到 [Microsoft Defender 誤判提交](https://www.microsoft.com/en-us/wdsi/filesubmission) 回報，審核通過後該版本較不會再被擋。
+- 最徹底的做法是購買程式碼簽章憑證（Code Signing Certificate）幫 exe 簽章，但需要費用。
 
 ## 為什麼執行檔（exe）這麼大（約 91MB）
 
