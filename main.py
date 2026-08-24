@@ -23,7 +23,7 @@ MAX_BYTES = 25 * 1024 * 1024
 
 # Groq on-demand tier 的 TPM（每分鐘 token 數）上限較低（約 8000），
 # 長逐字稿必須切段分批送出，避免單次請求就超過限制。
-CHUNK_CHAR_LIMIT = 3000
+CHUNK_CHAR_LIMIT = 1500
 
 MINUTES_PROMPT = """你是專業的會議紀錄助理。請根據以下會議逐字稿，用繁體中文整理成結構化的會議紀錄，嚴格使用以下格式（Markdown）：
 
@@ -182,6 +182,15 @@ PARTIAL_PROMPT = """你是專業的會議紀錄助理。以下是一段會議逐
 {chunk}
 ---"""
 
+REDUCE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議逐字稿依序分段整理出的重點筆記，
+請將它們合併、去除重複，用繁體中文條列整理成更精簡的重點筆記（討論內容、結論、待辦事項、待確認事項），
+不要下總結標題，只需要條列內容本身。
+
+分段筆記：
+---
+{notes}
+---"""
+
 MERGE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議逐字稿依序分段整理出的重點筆記，請將它們合併、去除重複，
 整理成一份完整的繁體中文會議紀錄，嚴格使用以下格式（Markdown）：
 
@@ -212,20 +221,32 @@ MERGE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議�
 
 def split_transcript(transcript: str, limit: int = CHUNK_CHAR_LIMIT) -> list[str]:
     sentences = re.split(r"(?<=[。！？\n])", transcript)
+    pieces: list[str] = []
+    for sentence in sentences:
+        # 語音辨識逐字稿可能標點稀疏，單一「句子」也可能超過 limit，
+        # 這種情況直接強制按字數硬切，避免整段仍然過大。
+        if len(sentence) > limit:
+            for i in range(0, len(sentence), limit):
+                pieces.append(sentence[i : i + limit])
+        elif sentence:
+            pieces.append(sentence)
+
     chunks: list[str] = []
     current = ""
-    for sentence in sentences:
-        if current and len(current) + len(sentence) > limit:
+    for piece in pieces:
+        if current and len(current) + len(piece) > limit:
             chunks.append(current)
-            current = sentence
+            current = piece
         else:
-            current += sentence
+            current += piece
     if current.strip():
         chunks.append(current)
     return chunks or [transcript]
 
 
-def call_llm(client: OpenAI, system: str, user: str, retries: int = 3) -> str:
+def call_llm(
+    client: OpenAI, system: str, user: str, max_tokens: int = 1024, retries: int = 3
+) -> str:
     for attempt in range(retries):
         try:
             resp = client.chat.completions.create(
@@ -235,6 +256,7 @@ def call_llm(client: OpenAI, system: str, user: str, retries: int = 3) -> str:
                     {"role": "user", "content": user},
                 ],
                 temperature=0.2,
+                max_tokens=max_tokens,
             )
             return resp.choices[0].message.content or ""
         except RateLimitError:
@@ -251,7 +273,9 @@ def summarize(client: OpenAI, transcript: str) -> str:
 
     if len(chunks) == 1:
         print(f"[2/2] 使用 {LLM_MODEL} 整理會議紀錄中 ...")
-        return call_llm(client, system, MINUTES_PROMPT.format(transcript=transcript))
+        return call_llm(
+            client, system, MINUTES_PROMPT.format(transcript=transcript), max_tokens=2048
+        )
 
     print(
         f"[2/2] 逐字稿較長，切成 {len(chunks)} 段分批整理（避免超過 Groq 每分鐘 token 限制）..."
@@ -263,13 +287,30 @@ def summarize(client: OpenAI, transcript: str) -> str:
             client,
             system,
             PARTIAL_PROMPT.format(idx=i, total=len(chunks), chunk=chunk),
+            max_tokens=600,
         )
         notes.append(f"【第 {i} 段】\n{note}")
-        if i < len(chunks):
+        time.sleep(8)
+
+    # 分段筆記若數量多，接在一起可能仍超過安全長度，先分批壓縮（reduce）
+    while sum(len(n) for n in notes) > CHUNK_CHAR_LIMIT:
+        print(f"  分段筆記仍偏長（共 {len(notes)} 段），再次壓縮合併 ...")
+        batches = split_transcript("\n\n".join(notes), limit=CHUNK_CHAR_LIMIT)
+        reduced: list[str] = []
+        for batch in batches:
+            reduced.append(
+                call_llm(client, system, REDUCE_PROMPT.format(notes=batch), max_tokens=800)
+            )
             time.sleep(8)
+        notes = reduced
 
     print("  合併分段筆記為最終會議紀錄 ...")
-    return call_llm(client, system, MERGE_PROMPT.format(notes="\n\n".join(notes)))
+    return call_llm(
+        client,
+        system,
+        MERGE_PROMPT.format(notes="\n\n".join(notes)),
+        max_tokens=2048,
+    )
 
 
 def main() -> None:
