@@ -1,12 +1,14 @@
 import argparse
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from export_word import export_docx
 
@@ -18,6 +20,10 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 WHISPER_MODEL = "whisper-large-v3-turbo"
 LLM_MODEL = "openai/gpt-oss-120b"
 MAX_BYTES = 25 * 1024 * 1024
+
+# Groq on-demand tier 的 TPM（每分鐘 token 數）上限較低（約 8000），
+# 長逐字稿必須切段分批送出，避免單次請求就超過限制。
+CHUNK_CHAR_LIMIT = 3000
 
 MINUTES_PROMPT = """你是專業的會議紀錄助理。請根據以下會議逐字稿，用繁體中文整理成結構化的會議紀錄，嚴格使用以下格式（Markdown）：
 
@@ -167,20 +173,103 @@ def transcribe(client: OpenAI, audio_path: Path, language: str | None) -> str:
     return text
 
 
+PARTIAL_PROMPT = """你是專業的會議紀錄助理。以下是一段會議逐字稿的「部分內容」（第 {idx}/{total} 段），
+請用繁體中文條列整理這一段出現的重點：討論內容、已達成的結論、待辦事項（含負責人與期限，若有提到）、需要向與會者確認的模糊之處。
+只整理這一段實際出現的內容，不要編造，也不要下總結標題。
+
+逐字稿片段：
+---
+{chunk}
+---"""
+
+MERGE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議逐字稿依序分段整理出的重點筆記，請將它們合併、去除重複，
+整理成一份完整的繁體中文會議紀錄，嚴格使用以下格式（Markdown）：
+
+# 會議紀錄
+
+## 重點摘要
+- （3~5 點）
+
+## 討論事項
+1. （條列重要討論內容）
+
+## 決議事項
+1. （已達成的結論；若無則寫「無」）
+
+## 待辦事項
+| 項目 | 負責人 | 期限 |
+| --- | --- | --- |
+| （若無則寫「無」） | | |
+
+## 待確認事項
+- （語意不清、需要向與會者確認的部分；若無則寫「無」）
+
+分段筆記：
+---
+{notes}
+---"""
+
+
+def split_transcript(transcript: str, limit: int = CHUNK_CHAR_LIMIT) -> list[str]:
+    sentences = re.split(r"(?<=[。！？\n])", transcript)
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and len(current) + len(sentence) > limit:
+            chunks.append(current)
+            current = sentence
+        else:
+            current += sentence
+    if current.strip():
+        chunks.append(current)
+    return chunks or [transcript]
+
+
+def call_llm(client: OpenAI, system: str, user: str, retries: int = 3) -> str:
+    for attempt in range(retries):
+        try:
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+            )
+            return resp.choices[0].message.content or ""
+        except RateLimitError:
+            if attempt == retries - 1:
+                raise
+            print("  觸發速率限制，等待 20 秒後重試 ...")
+            time.sleep(20)
+    return ""
+
+
 def summarize(client: OpenAI, transcript: str) -> str:
-    print(f"[2/2] 使用 {LLM_MODEL} 整理會議紀錄中 ...")
-    resp = client.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": "你是一位擅長整理會議紀錄的助理，輸出簡潔、條理分明的繁體中文。",
-            },
-            {"role": "user", "content": MINUTES_PROMPT.format(transcript=transcript)},
-        ],
-        temperature=0.2,
+    system = "你是一位擅長整理會議紀錄的助理，輸出簡潔、條理分明的繁體中文。"
+    chunks = split_transcript(transcript)
+
+    if len(chunks) == 1:
+        print(f"[2/2] 使用 {LLM_MODEL} 整理會議紀錄中 ...")
+        return call_llm(client, system, MINUTES_PROMPT.format(transcript=transcript))
+
+    print(
+        f"[2/2] 逐字稿較長，切成 {len(chunks)} 段分批整理（避免超過 Groq 每分鐘 token 限制）..."
     )
-    return resp.choices[0].message.content or ""
+    notes: list[str] = []
+    for i, chunk in enumerate(chunks, start=1):
+        print(f"  整理第 {i}/{len(chunks)} 段 ...")
+        note = call_llm(
+            client,
+            system,
+            PARTIAL_PROMPT.format(idx=i, total=len(chunks), chunk=chunk),
+        )
+        notes.append(f"【第 {i} 段】\n{note}")
+        if i < len(chunks):
+            time.sleep(8)
+
+    print("  合併分段筆記為最終會議紀錄 ...")
+    return call_llm(client, system, MERGE_PROMPT.format(notes="\n\n".join(notes)))
 
 
 def main() -> None:
