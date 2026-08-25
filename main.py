@@ -82,6 +82,19 @@ FORMAT_PRESETS: dict[str, str] = {
 
 ## 待確認事項
 - （語意不清、需要進一步確認的部分；若無則寫「無」）""",
+    "影片重點整理": """# 影片重點整理
+
+## 影片主題
+- （這支影片在講什麼，2~3 句說明）
+
+## 章節式重點
+1. （依影片播出順序，將內容拆成幾個段落並條列每段重點）
+
+## 關鍵結論 / 論點
+- （影片最終想傳達的重點或結論）
+
+## 值得查證 / 延伸閱讀
+- （提到但沒展開、或值得進一步查證的地方；若無則寫「無」）""",
 }
 
 DEFAULT_TEMPLATE = "會議紀錄"
@@ -115,6 +128,41 @@ def resolve_ffmpeg() -> str:
     if found:
         return found
     sys.exit("錯誤：找不到 ffmpeg，請安裝後再試")
+
+
+def sanitize_filename(name: str, max_len: int = 80) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|\n\r\t]', "_", name).strip(" ._")
+    return (cleaned or "youtube_audio")[:max_len]
+
+
+def download_youtube_audio(url: str, dest_dir: Path) -> tuple[Path, str]:
+    """下載 YouTube 影片的音軌，回傳 (音檔路徑, 影片標題)。"""
+    import yt_dlp
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ffmpeg_dir = str(Path(resolve_ffmpeg()).parent)
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(dest_dir / "%(id)s.%(ext)s"),
+        "ffmpeg_location": ffmpeg_dir,
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        raise RuntimeError(f"YouTube 下載失敗：{e}") from e
+
+    video_id = info["id"]
+    title = info.get("title") or video_id
+    matches = sorted(dest_dir.glob(f"{video_id}.*"))
+    if not matches:
+        raise RuntimeError("YouTube 音訊下載失敗，找不到輸出檔案")
+    return matches[0], title
 
 
 GROQ_ALLOWED_EXTS = {
@@ -380,7 +428,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="錄音轉文字 + 會議紀錄整理（Groq 免費模型）"
     )
-    parser.add_argument("audio", help="音檔路徑（m4a/mp3/wav/ogg/webm 等）")
+    parser.add_argument(
+        "audio", nargs="?", help="音檔路徑（m4a/mp3/wav/ogg/webm 等），與 --youtube 擇一"
+    )
+    parser.add_argument("--youtube", help="YouTube 影片網址，與音檔路徑擇一")
     parser.add_argument("--language", help="指定語言代碼，例如 zh（預設自動偵測）")
     parser.add_argument(
         "--context",
@@ -404,13 +455,22 @@ def main() -> None:
     args = parser.parse_args()
     format_spec = args.custom_template or FORMAT_PRESETS[args.template]
 
-    audio_path = Path(args.audio)
-    if not audio_path.exists():
-        sys.exit(f"錯誤：找不到檔案 {audio_path}")
+    if not args.youtube and not args.audio:
+        sys.exit("錯誤：請提供音檔路徑，或使用 --youtube 指定影片網址")
 
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
-    stem = audio_path.stem
+
+    if args.youtube:
+        print("[0/2] 從 YouTube 下載音訊中 ...")
+        audio_path, title = download_youtube_audio(args.youtube, out_dir / "youtube_downloads")
+        stem = sanitize_filename(title)
+        print(f"  已下載：{audio_path}（{title}）")
+    else:
+        audio_path = Path(args.audio)
+        if not audio_path.exists():
+            sys.exit(f"錯誤：找不到檔案 {audio_path}")
+        stem = audio_path.stem
 
     client = get_client()
     transcript_path = out_dir / f"{stem}_transcript.txt"

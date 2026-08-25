@@ -22,9 +22,11 @@ from main import (
     GROQ_BASE_URL,
     MAX_BYTES,
     WHISPER_MODEL,
+    download_youtube_audio,
     get_client,
     needs_conversion,
     prepare_audio,
+    sanitize_filename,
     summarize,
 )
 from export_word import export_docx
@@ -43,7 +45,8 @@ def has_valid_key_format() -> bool:
 class PipelineTask:
     def __init__(
         self,
-        audio_path: Path,
+        source_kind: str,
+        source_value: str,
         language: str | None,
         context: str | None,
         format_spec: str,
@@ -51,7 +54,8 @@ class PipelineTask:
         on_done,
         on_error,
     ):
-        self.audio_path = audio_path
+        self.source_kind = source_kind  # "file" or "youtube"
+        self.source_value = source_value
         self.language = language
         self.context = context
         self.format_spec = format_spec
@@ -71,13 +75,21 @@ class PipelineTask:
             self.on_error(e)
 
     def _pipeline(self):
-        audio_path = self.audio_path
-        out_dir = audio_path.parent / "meeting2text_output"
-        out_dir.mkdir(exist_ok=True)
-        stem = audio_path.stem
-        transcript_path = out_dir / f"{stem}_transcript.txt"
-
         client = get_client()
+
+        if self.source_kind == "youtube":
+            self.on_status("從 YouTube 下載音訊中（依影片長度可能需要一些時間）...")
+            downloads_dir = APP_DIR / "meeting2text_output" / "_youtube_downloads"
+            audio_path, title = download_youtube_audio(self.source_value, downloads_dir)
+            stem = sanitize_filename(title)
+            out_dir = APP_DIR / "meeting2text_output" / stem
+        else:
+            audio_path = self.source_value
+            out_dir = audio_path.parent / "meeting2text_output"
+            stem = audio_path.stem
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = out_dir / f"{stem}_transcript.txt"
 
         if transcript_path.exists():
             self.on_status("發現既有逐字稿，直接重用")
@@ -260,16 +272,27 @@ def main() -> None:
     ttk.Label(header, text="會議錄音轉文字工具", style="Title.TLabel").pack(anchor="w")
     ttk.Label(
         header,
-        text="選擇錄音檔 → 自動轉文字 → AI 整理成會議紀錄與 Word 檔",
+        text="選擇錄音檔或 YouTube 連結 → 自動轉文字 → AI 整理成文件與 Word 檔",
         style="Subtitle.TLabel",
     ).pack(anchor="w", pady=(2, 0))
 
-    # ---- STEP 1：選擇音檔 ----
+    # ---- STEP 1：選擇來源 ----
     c1 = card(frm)
-    ttk.Label(c1, text="STEP 1　選擇會議錄音檔", style="Step.TLabel").pack(anchor="w")
+    ttk.Label(c1, text="STEP 1　選擇內容來源", style="Step.TLabel").pack(anchor="w")
+
+    source_var = tk.StringVar(value="file")
+    source_row = ttk.Frame(c1, style="Card.TFrame")
+    source_row.pack(fill="x", pady=(10, 0))
+    radio_file = ttk.Radiobutton(
+        source_row, text="📂 本機音檔", variable=source_var, value="file"
+    )
+    radio_youtube = ttk.Radiobutton(
+        source_row, text="🔗 YouTube 連結", variable=source_var, value="youtube"
+    )
+    radio_file.pack(side="left")
+    radio_youtube.pack(side="left", padx=(16, 0))
 
     file_row = ttk.Frame(c1, style="Card.TFrame")
-    file_row.pack(fill="x", pady=(10, 0))
     lbl_file = ttk.Label(
         file_row,
         text="尚未選擇檔案",
@@ -298,6 +321,30 @@ def main() -> None:
             refresh_start_state()
 
     btn_pick.config(command=pick_file)
+
+    youtube_row = ttk.Frame(c1, style="Card.TFrame")
+    youtube_var = tk.StringVar()
+    youtube_entry = ttk.Entry(youtube_row, textvariable=youtube_var)
+    youtube_entry.pack(fill="x")
+    ttk.Label(
+        youtube_row,
+        text="貼上 YouTube 影片網址，程式只會下載音軌來轉文字整理",
+        style="Hint.TLabel",
+    ).pack(anchor="w", pady=(4, 0))
+    youtube_var.trace_add("write", lambda *_: refresh_start_state())
+
+    def toggle_source() -> None:
+        if source_var.get() == "file":
+            youtube_row.pack_forget()
+            file_row.pack(fill="x", pady=(10, 0))
+        else:
+            file_row.pack_forget()
+            youtube_row.pack(fill="x", pady=(10, 0))
+        refresh_start_state()
+
+    radio_file.config(command=toggle_source)
+    radio_youtube.config(command=toggle_source)
+    file_row.pack(fill="x", pady=(10, 0))
 
     # ---- STEP 2：選項 ----
     c2 = card(frm)
@@ -381,14 +428,21 @@ def main() -> None:
     status_row.pack(fill="x", pady=(4, 0))
     lbl_status_dot = tk.Label(status_row, text="●", fg=MUTED, bg=CARD, font=("Arial", 10))
     lbl_status_dot.pack(side="left")
-    lbl_status = ttk.Label(status_row, text="就緒，請先選擇音檔", style="Card.TLabel")
+    lbl_status = ttk.Label(
+        status_row, text="就緒，請先選擇音檔或輸入 YouTube 連結", style="Card.TLabel"
+    )
     lbl_status.pack(side="left", padx=(6, 0))
 
     result_row = ttk.Frame(c3, style="Card.TFrame")
     btn_open = ttk.Button(result_row, text="📁 開啟輸出資料夾", style="Secondary.TButton")
 
+    def has_valid_source() -> bool:
+        if source_var.get() == "youtube":
+            return bool(youtube_var.get().strip())
+        return state["audio"] is not None
+
     def refresh_start_state() -> None:
-        btn_start.config(state="normal" if state["audio"] else "disabled")
+        btn_start.config(state="normal" if has_valid_source() else "disabled")
 
     # ---- API Key 狀態列（頁尾，弱化處理） ----
     row_key = ttk.Frame(frm)
@@ -445,8 +499,11 @@ def main() -> None:
         else:
             progress.stop()
             progress.pack_forget()
-        btn_start.config(state="disabled" if busy else ("normal" if state["audio"] else "disabled"))
+        btn_start.config(state="disabled" if busy else ("normal" if has_valid_source() else "disabled"))
         btn_pick.config(state="disabled" if busy else "normal")
+        radio_file.config(state="disabled" if busy else "normal")
+        radio_youtube.config(state="disabled" if busy else "normal")
+        youtube_entry.config(state="disabled" if busy else "normal")
         context_entry.config(state="disabled" if busy else "normal")
         lang_box.config(state="disabled" if busy else "readonly")
         template_box.config(state="disabled" if busy else "readonly")
@@ -460,7 +517,7 @@ def main() -> None:
             result_row.pack(fill="x", pady=(10, 0))
             messagebox.showinfo(
                 "完成",
-                "會議紀錄已產生：\n\n"
+                "文件已產生：\n\n"
                 f"{result['minutes_docx'].name}\n\n"
                 f"輸出資料夾：\n{result['out_dir']}",
             )
@@ -479,10 +536,19 @@ def main() -> None:
         root.after(0, ui)
 
     def start() -> None:
-        audio = state["audio"]
-        if audio is None:
-            messagebox.showwarning("提醒", "請先選擇音檔")
-            return
+        if source_var.get() == "youtube":
+            url = youtube_var.get().strip()
+            if not url:
+                messagebox.showwarning("提醒", "請輸入 YouTube 影片網址")
+                return
+            source_kind, source_value = "youtube", url
+        else:
+            audio = state["audio"]
+            if audio is None:
+                messagebox.showwarning("提醒", "請先選擇音檔")
+                return
+            source_kind, source_value = "file", audio
+
         if template_var.get() == TEMPLATE_CUSTOM:
             format_spec = custom_template_text.get("1.0", "end").strip()
             if not format_spec:
@@ -493,7 +559,8 @@ def main() -> None:
         result_row.pack_forget()
         lang_map = {"自動偵測": None, "中文 (zh)": "zh", "英文 (en)": "en"}
         task = PipelineTask(
-            audio,
+            source_kind,
+            source_value,
             lang_map.get(lang_var.get()),
             context_var.get(),
             format_spec,
