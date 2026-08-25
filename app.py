@@ -434,7 +434,29 @@ def main() -> None:
     lbl_status.pack(side="left", padx=(6, 0))
 
     result_row = ttk.Frame(c3, style="Card.TFrame")
-    btn_open = ttk.Button(result_row, text="📁 開啟輸出資料夾", style="Secondary.TButton")
+    ttk.Label(result_row, text="輸出資料夾", style="Card.TLabel").pack(anchor="w")
+
+    path_row = ttk.Frame(result_row, style="Card.TFrame")
+    path_row.pack(fill="x", pady=(4, 0))
+    path_var = tk.StringVar()
+    path_entry = ttk.Entry(path_row, textvariable=path_var, state="readonly")
+    path_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+    def copy_path() -> None:
+        root.clipboard_clear()
+        root.clipboard_append(path_var.get())
+        set_status("已複製路徑到剪貼簿", SUCCESS)
+
+    btn_copy = ttk.Button(
+        path_row, text="📋 複製", style="Secondary.TButton", command=copy_path
+    )
+    btn_copy.pack(side="left")
+
+    btn_open = ttk.Button(result_row, text="📁 開啟輸出資料夾", style="Accent.TButton")
+    btn_open.pack(fill="x", pady=(8, 0))
+
+    # 路徑欄位本身也能直接點兩下開啟資料夾
+    path_entry.bind("<Double-Button-1>", lambda _e: btn_open.invoke())
 
     def has_valid_source() -> bool:
         if source_var.get() == "youtube":
@@ -513,6 +535,7 @@ def main() -> None:
         def ui():
             set_busy(False)
             set_status("完成！", SUCCESS)
+            path_var.set(str(result["out_dir"]))
             btn_open.config(command=lambda: os.startfile(str(result["out_dir"])))
             result_row.pack(fill="x", pady=(10, 0))
             messagebox.showinfo(
