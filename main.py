@@ -47,7 +47,7 @@ MINUTES_PROMPT = """你是專業的會議紀錄助理。請根據以下會議逐
 - （逐字稿中語意不清、需要向與會者確認的部分；若無則寫「無」）
 
 注意：逐字稿由 AI 語音辨識產生，可能有錯字或同音誤植，請依上下文合理推斷並修正，但不要自行捏造未提及的內容。
-
+{context_block}
 逐字稿：
 ---
 {transcript}
@@ -151,22 +151,21 @@ def prepare_audio(audio_path: Path, dest_dir: Path | None = None) -> Path:
     return compressed
 
 
-def transcribe(client: OpenAI, audio_path: Path, language: str | None) -> str:
+def transcribe(
+    client: OpenAI,
+    audio_path: Path,
+    language: str | None,
+    context: str | None = None,
+) -> str:
     print(f"[1/2] 使用 {WHISPER_MODEL} 轉文字中 ...")
+    kwargs: dict[str, Any] = {"model": WHISPER_MODEL, "temperature": 0}
+    if language:
+        kwargs["language"] = language
+    if context and context.strip():
+        # Whisper 的 prompt 參數可以提示專有名詞/產業用語，改善辨識時的用詞準確度
+        kwargs["prompt"] = context.strip()[:800]
     with audio_path.open("rb") as f:
-        if language:
-            resp = client.audio.transcriptions.create(
-                model=WHISPER_MODEL,
-                file=(audio_path.name, f),
-                temperature=0,
-                language=language,
-            )
-        else:
-            resp = client.audio.transcriptions.create(
-                model=WHISPER_MODEL,
-                file=(audio_path.name, f),
-                temperature=0,
-            )
+        resp = client.audio.transcriptions.create(file=(audio_path.name, f), **kwargs)
     text = resp.text
     if not text.strip():
         sys.exit("錯誤：轉文字結果為空")
@@ -176,7 +175,7 @@ def transcribe(client: OpenAI, audio_path: Path, language: str | None) -> str:
 PARTIAL_PROMPT = """你是專業的會議紀錄助理。以下是一段會議逐字稿的「部分內容」（第 {idx}/{total} 段），
 請用繁體中文條列整理這一段出現的重點：討論內容、已達成的結論、待辦事項（含負責人與期限，若有提到）、需要向與會者確認的模糊之處。
 只整理這一段實際出現的內容，不要編造，也不要下總結標題。
-
+{context_block}
 逐字稿片段：
 ---
 {chunk}
@@ -185,7 +184,7 @@ PARTIAL_PROMPT = """你是專業的會議紀錄助理。以下是一段會議逐
 REDUCE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議逐字稿依序分段整理出的重點筆記，
 請將它們合併、去除重複，用繁體中文條列整理成更精簡的重點筆記（討論內容、結論、待辦事項、待確認事項），
 不要下總結標題，只需要條列內容本身。
-
+{context_block}
 分段筆記：
 ---
 {notes}
@@ -212,11 +211,21 @@ MERGE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議�
 
 ## 待確認事項
 - （語意不清、需要向與會者確認的部分；若無則寫「無」）
-
+{context_block}
 分段筆記：
 ---
 {notes}
 ---"""
+
+
+def build_context_block(context: str | None) -> str:
+    if not context or not context.strip():
+        return ""
+    return (
+        "\n背景資訊（產業／場景／專有名詞提示，語音辨識可能把這些詞誤植成同音的一般用字，"
+        "請優先依此處提示修正用詞，但不要因此捏造逐字稿沒提到的內容）：\n"
+        f"{context.strip()}\n"
+    )
 
 
 def split_transcript(transcript: str, limit: int = CHUNK_CHAR_LIMIT) -> list[str]:
@@ -267,14 +276,18 @@ def call_llm(
     return ""
 
 
-def summarize(client: OpenAI, transcript: str) -> str:
+def summarize(client: OpenAI, transcript: str, context: str | None = None) -> str:
     system = "你是一位擅長整理會議紀錄的助理，輸出簡潔、條理分明的繁體中文。"
+    context_block = build_context_block(context)
     chunks = split_transcript(transcript)
 
     if len(chunks) == 1:
         print(f"[2/2] 使用 {LLM_MODEL} 整理會議紀錄中 ...")
         return call_llm(
-            client, system, MINUTES_PROMPT.format(transcript=transcript), max_tokens=2048
+            client,
+            system,
+            MINUTES_PROMPT.format(transcript=transcript, context_block=context_block),
+            max_tokens=2048,
         )
 
     print(
@@ -286,7 +299,9 @@ def summarize(client: OpenAI, transcript: str) -> str:
         note = call_llm(
             client,
             system,
-            PARTIAL_PROMPT.format(idx=i, total=len(chunks), chunk=chunk),
+            PARTIAL_PROMPT.format(
+                idx=i, total=len(chunks), chunk=chunk, context_block=context_block
+            ),
             max_tokens=600,
         )
         notes.append(f"【第 {i} 段】\n{note}")
@@ -299,7 +314,12 @@ def summarize(client: OpenAI, transcript: str) -> str:
         reduced: list[str] = []
         for batch in batches:
             reduced.append(
-                call_llm(client, system, REDUCE_PROMPT.format(notes=batch), max_tokens=800)
+                call_llm(
+                    client,
+                    system,
+                    REDUCE_PROMPT.format(notes=batch, context_block=context_block),
+                    max_tokens=800,
+                )
             )
             time.sleep(8)
         notes = reduced
@@ -308,7 +328,7 @@ def summarize(client: OpenAI, transcript: str) -> str:
     return call_llm(
         client,
         system,
-        MERGE_PROMPT.format(notes="\n\n".join(notes)),
+        MERGE_PROMPT.format(notes="\n\n".join(notes), context_block=context_block),
         max_tokens=2048,
     )
 
@@ -323,6 +343,10 @@ def main() -> None:
     )
     parser.add_argument("audio", help="音檔路徑（m4a/mp3/wav/ogg/webm 等）")
     parser.add_argument("--language", help="指定語言代碼，例如 zh（預設自動偵測）")
+    parser.add_argument(
+        "--context",
+        help="補充提示詞，例如產業別、專案代號、常見專有名詞，用來提升辨識與整理的用詞準確度",
+    )
     parser.add_argument(
         "--reuse-transcript",
         action="store_true",
@@ -346,11 +370,11 @@ def main() -> None:
         print("[1/2] 重用既有逐字稿：" + str(transcript_path))
     else:
         audio_for_api = prepare_audio(audio_path)
-        transcript = transcribe(client, audio_for_api, args.language)
+        transcript = transcribe(client, audio_for_api, args.language, args.context)
         transcript_path.write_text(transcript, encoding="utf-8")
         print(f"  已儲存逐字稿：{transcript_path}")
 
-    minutes = summarize(client, transcript)
+    minutes = summarize(client, transcript, args.context)
 
     minutes_path = out_dir / f"{stem}_minutes.md"
     minutes_path.write_text(minutes, encoding="utf-8")

@@ -40,10 +40,17 @@ def has_valid_key_format() -> bool:
 
 class PipelineTask:
     def __init__(
-        self, audio_path: Path, language: str | None, on_status, on_done, on_error
+        self,
+        audio_path: Path,
+        language: str | None,
+        context: str | None,
+        on_status,
+        on_done,
+        on_error,
     ):
         self.audio_path = audio_path
         self.language = language
+        self.context = context
         self.on_status = on_status
         self.on_done = on_done
         self.on_error = on_error
@@ -78,25 +85,20 @@ class PipelineTask:
             self.on_status(
                 f"使用 {WHISPER_MODEL} 轉文字中（長錄音可能需要數分鐘，請耐心等候）..."
             )
+            kwargs: dict = {"model": WHISPER_MODEL, "temperature": 0}
+            if self.language:
+                kwargs["language"] = self.language
+            if self.context and self.context.strip():
+                kwargs["prompt"] = self.context.strip()[:800]
             with audio_for_api.open("rb") as f:
-                if self.language:
-                    resp = client.audio.transcriptions.create(
-                        model=WHISPER_MODEL,
-                        file=(audio_for_api.name, f),
-                        temperature=0,
-                        language=self.language,
-                    )
-                else:
-                    resp = client.audio.transcriptions.create(
-                        model=WHISPER_MODEL,
-                        file=(audio_for_api.name, f),
-                        temperature=0,
-                    )
+                resp = client.audio.transcriptions.create(
+                    file=(audio_for_api.name, f), **kwargs
+                )
             transcript = resp.text
             transcript_path.write_text(transcript, encoding="utf-8")
 
         self.on_status("AI 整理會議紀錄中...")
-        minutes = summarize(client, transcript)
+        minutes = summarize(client, transcript, self.context)
 
         minutes_path = out_dir / f"{stem}_minutes.md"
         minutes_path.write_text(minutes, encoding="utf-8")
@@ -118,7 +120,7 @@ def main() -> None:
 
     root = tk.Tk()
     root.title("會議錄音轉文字工具")
-    root.geometry("640x360")
+    root.geometry("640x430")
     root.resizable(False, False)
 
     state: dict[str, Path | None] = {"audio": None}
@@ -200,6 +202,19 @@ def main() -> None:
     lang_box.pack(side="left")
     row2.pack(pady=4)
 
+    row3 = ttk.Frame(frm)
+    row3.pack(fill="x", pady=(8, 4))
+    ttk.Label(row3, text="補充提示詞（產業別／專有名詞，選填）：").pack(anchor="w")
+    context_var = tk.StringVar()
+    context_entry = ttk.Entry(row3, textvariable=context_var)
+    context_entry.pack(fill="x", pady=(4, 0))
+    ttk.Label(
+        row3,
+        text="例如：半導體產業、蝕刻機台、良率、公司內部代號等，可提升辨識與整理的用詞準確度",
+        foreground="#888",
+        font=("微軟正黑體", 8),
+    ).pack(anchor="w")
+
     progress.pack(fill="x", pady=(18, 6))
     lbl_status.pack(anchor="w")
     btn_start.pack(pady=(14))
@@ -256,6 +271,7 @@ def main() -> None:
             progress.stop()
         btn_start.config(state="disabled" if busy else "normal")
         btn_pick.config(state="disabled" if busy else "normal")
+        context_entry.config(state="disabled" if busy else "normal")
 
     def on_done(result: dict) -> None:
         def ui():
@@ -293,6 +309,7 @@ def main() -> None:
         task = PipelineTask(
             audio,
             lang_map.get(lang_var.get()),
+            context_var.get(),
             on_status=lambda s: root.after(0, lambda: lbl_status.config(text=s)),
             on_done=on_done,
             on_error=on_error,
