@@ -25,9 +25,10 @@ MAX_BYTES = 25 * 1024 * 1024
 # 長逐字稿必須切段分批送出，避免單次請求就超過限制。
 CHUNK_CHAR_LIMIT = 1500
 
-MINUTES_PROMPT = """你是專業的會議紀錄助理。請根據以下會議逐字稿，用繁體中文整理成結構化的會議紀錄，嚴格使用以下格式（Markdown）：
-
-# 會議紀錄
+# 輸出文件類型預設：key 是 GUI/CLI 選單顯示的名稱，value 是該類型的 Markdown 結構規格。
+# 使用者也可以在 GUI 選「自訂範本」自行輸入一段規格文字取代下面任一項。
+FORMAT_PRESETS: dict[str, str] = {
+    "會議紀錄": """# 會議紀錄
 
 ## 重點摘要
 - （3~5 點）
@@ -44,7 +45,50 @@ MINUTES_PROMPT = """你是專業的會議紀錄助理。請根據以下會議逐
 | （若無則寫「無」） | | |
 
 ## 待確認事項
-- （逐字稿中語意不清、需要向與會者確認的部分；若無則寫「無」）
+- （逐字稿中語意不清、需要向與會者確認的部分；若無則寫「無」）""",
+    "訪談紀錄": """# 訪談紀錄
+
+## 受訪者背景與主題
+- （訪談對象、主題、目的等，若逐字稿有提及）
+
+## 重點問答整理
+- （依討論順序條列「問題 → 回覆重點」）
+
+## 關鍵引述
+- （1~3 句最具代表性的原話，若有）
+
+## 待確認 / 待追問事項
+- （語意不清或值得進一步追問的地方；若無則寫「無」）""",
+    "課程筆記": """# 課程筆記
+
+## 主題摘要
+- （這堂課／這段內容在講什麼，3~5 點）
+
+## 重點內容
+1. （依邏輯順序條列重點，可分小節）
+
+## 重要名詞 / 定義
+- （課程中出現的專有名詞與其定義；若無則寫「無」）
+
+## 延伸問題 / 待釐清
+- （聽完後值得進一步查證或提問的地方；若無則寫「無」）""",
+    "通用摘要": """# 內容摘要
+
+## 摘要
+- （2~4 句總結整體內容）
+
+## 重點條列
+1. （依出現順序條列重點）
+
+## 待確認事項
+- （語意不清、需要進一步確認的部分；若無則寫「無」）""",
+}
+
+DEFAULT_TEMPLATE = "會議紀錄"
+
+MINUTES_PROMPT = """你是專業的文件整理助理。請根據以下逐字稿內容，用繁體中文整理成結構化文件，嚴格使用以下格式（Markdown）：
+
+{format_spec}
 
 注意：逐字稿由 AI 語音辨識產生，可能有錯字或同音誤植，請依上下文合理推斷並修正，但不要自行捏造未提及的內容。
 {context_block}
@@ -190,27 +234,10 @@ REDUCE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議�
 {notes}
 ---"""
 
-MERGE_PROMPT = """你是專業的會議紀錄助理。以下是同一場會議逐字稿依序分段整理出的重點筆記，請將它們合併、去除重複，
-整理成一份完整的繁體中文會議紀錄，嚴格使用以下格式（Markdown）：
+MERGE_PROMPT = """你是專業的文件整理助理。以下是同一份逐字稿依序分段整理出的重點筆記，請將它們合併、去除重複，
+整理成一份完整的文件，嚴格使用以下格式（Markdown）：
 
-# 會議紀錄
-
-## 重點摘要
-- （3~5 點）
-
-## 討論事項
-1. （條列重要討論內容）
-
-## 決議事項
-1. （已達成的結論；若無則寫「無」）
-
-## 待辦事項
-| 項目 | 負責人 | 期限 |
-| --- | --- | --- |
-| （若無則寫「無」） | | |
-
-## 待確認事項
-- （語意不清、需要向與會者確認的部分；若無則寫「無」）
+{format_spec}
 {context_block}
 分段筆記：
 ---
@@ -276,17 +303,27 @@ def call_llm(
     return ""
 
 
-def summarize(client: OpenAI, transcript: str, context: str | None = None) -> str:
-    system = "你是一位擅長整理會議紀錄的助理，輸出簡潔、條理分明的繁體中文。"
+def summarize(
+    client: OpenAI,
+    transcript: str,
+    context: str | None = None,
+    format_spec: str | None = None,
+) -> str:
+    system = "你是一位擅長整理文件的助理，輸出簡潔、條理分明的繁體中文。"
     context_block = build_context_block(context)
+    format_spec = format_spec or FORMAT_PRESETS[DEFAULT_TEMPLATE]
     chunks = split_transcript(transcript)
 
     if len(chunks) == 1:
-        print(f"[2/2] 使用 {LLM_MODEL} 整理會議紀錄中 ...")
+        print(f"[2/2] 使用 {LLM_MODEL} 整理文件中 ...")
         return call_llm(
             client,
             system,
-            MINUTES_PROMPT.format(transcript=transcript, context_block=context_block),
+            MINUTES_PROMPT.format(
+                transcript=transcript,
+                context_block=context_block,
+                format_spec=format_spec,
+            ),
             max_tokens=2048,
         )
 
@@ -324,11 +361,13 @@ def summarize(client: OpenAI, transcript: str, context: str | None = None) -> st
             time.sleep(8)
         notes = reduced
 
-    print("  合併分段筆記為最終會議紀錄 ...")
+    print("  合併分段筆記為最終文件 ...")
     return call_llm(
         client,
         system,
-        MERGE_PROMPT.format(notes="\n\n".join(notes), context_block=context_block),
+        MERGE_PROMPT.format(
+            notes="\n\n".join(notes), context_block=context_block, format_spec=format_spec
+        ),
         max_tokens=2048,
     )
 
@@ -348,11 +387,22 @@ def main() -> None:
         help="補充提示詞，例如產業別、專案代號、常見專有名詞，用來提升辨識與整理的用詞準確度",
     )
     parser.add_argument(
+        "--template",
+        choices=list(FORMAT_PRESETS.keys()),
+        default=DEFAULT_TEMPLATE,
+        help=f"輸出文件類型（預設：{DEFAULT_TEMPLATE}）",
+    )
+    parser.add_argument(
+        "--custom-template",
+        help="手動指定輸出的 Markdown 結構規格，若有指定則覆蓋 --template",
+    )
+    parser.add_argument(
         "--reuse-transcript",
         action="store_true",
         help="若 output 已有同名逐字稿則跳過轉文字步驟",
     )
     args = parser.parse_args()
+    format_spec = args.custom_template or FORMAT_PRESETS[args.template]
 
     audio_path = Path(args.audio)
     if not audio_path.exists():
@@ -374,7 +424,7 @@ def main() -> None:
         transcript_path.write_text(transcript, encoding="utf-8")
         print(f"  已儲存逐字稿：{transcript_path}")
 
-    minutes = summarize(client, transcript, args.context)
+    minutes = summarize(client, transcript, args.context, format_spec)
 
     minutes_path = out_dir / f"{stem}_minutes.md"
     minutes_path.write_text(minutes, encoding="utf-8")

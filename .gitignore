@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 output/
+meeting2text_output/
 *.m4a
 *.aac
 *.mp3

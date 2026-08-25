@@ -17,6 +17,8 @@ load_dotenv(ENV_PATH)
 from openai import AuthenticationError
 
 from main import (
+    DEFAULT_TEMPLATE,
+    FORMAT_PRESETS,
     GROQ_BASE_URL,
     MAX_BYTES,
     WHISPER_MODEL,
@@ -44,6 +46,7 @@ class PipelineTask:
         audio_path: Path,
         language: str | None,
         context: str | None,
+        format_spec: str,
         on_status,
         on_done,
         on_error,
@@ -51,6 +54,7 @@ class PipelineTask:
         self.audio_path = audio_path
         self.language = language
         self.context = context
+        self.format_spec = format_spec
         self.on_status = on_status
         self.on_done = on_done
         self.on_error = on_error
@@ -97,8 +101,8 @@ class PipelineTask:
             transcript = resp.text
             transcript_path.write_text(transcript, encoding="utf-8")
 
-        self.on_status("AI 整理會議紀錄中...")
-        minutes = summarize(client, transcript, self.context)
+        self.on_status("AI 整理文件中...")
+        minutes = summarize(client, transcript, self.context, self.format_spec)
 
         minutes_path = out_dir / f"{stem}_minutes.md"
         minutes_path.write_text(minutes, encoding="utf-8")
@@ -134,6 +138,14 @@ def main() -> None:
     root.geometry("640x600")
     root.minsize(640, 480)
     root.configure(bg=BG)
+
+    icon_base = Path(getattr(sys, "_MEIPASS", APP_DIR))
+    icon_path = icon_base / "icon.ico"
+    if icon_path.exists():
+        try:
+            root.iconbitmap(str(icon_path))
+        except tk.TclError:
+            pass
 
     style = ttk.Style(root)
     try:
@@ -304,6 +316,46 @@ def main() -> None:
     )
     lang_box.pack(side="left", padx=(10, 0))
 
+    ttk.Label(c2, text="輸出文件類型", style="Card.TLabel").pack(anchor="w", pady=(14, 0))
+    TEMPLATE_CUSTOM = "自訂範本..."
+    template_names = list(FORMAT_PRESETS.keys()) + [TEMPLATE_CUSTOM]
+    template_var = tk.StringVar(value=DEFAULT_TEMPLATE)
+    template_box = ttk.Combobox(
+        c2,
+        textvariable=template_var,
+        state="readonly",
+        width=20,
+        values=template_names,
+    )
+    template_box.pack(anchor="w", pady=(6, 0))
+
+    custom_template_frame = ttk.Frame(c2, style="Card.TFrame")
+    custom_template_text = tk.Text(
+        custom_template_frame,
+        height=6,
+        wrap="word",
+        font=("Consolas", 9),
+        bg="white",
+        fg=TEXT,
+        relief="solid",
+        bd=1,
+        highlightthickness=0,
+    )
+    custom_template_text.pack(fill="x", pady=(6, 0))
+    ttk.Label(
+        custom_template_frame,
+        text="輸入你想要的 Markdown 結構規格（例如自訂標題與條列項目），會取代預設格式",
+        style="Hint.TLabel",
+    ).pack(anchor="w", pady=(4, 0))
+
+    def on_template_change(*_args) -> None:
+        if template_var.get() == TEMPLATE_CUSTOM:
+            custom_template_frame.pack(fill="x", pady=(8, 0))
+        else:
+            custom_template_frame.pack_forget()
+
+    template_box.bind("<<ComboboxSelected>>", on_template_change)
+
     ttk.Label(c2, text="補充提示詞（產業別／專有名詞）", style="Card.TLabel").pack(
         anchor="w", pady=(14, 0)
     )
@@ -397,6 +449,8 @@ def main() -> None:
         btn_pick.config(state="disabled" if busy else "normal")
         context_entry.config(state="disabled" if busy else "normal")
         lang_box.config(state="disabled" if busy else "readonly")
+        template_box.config(state="disabled" if busy else "readonly")
+        custom_template_text.config(state="disabled" if busy else "normal")
 
     def on_done(result: dict) -> None:
         def ui():
@@ -429,12 +483,20 @@ def main() -> None:
         if audio is None:
             messagebox.showwarning("提醒", "請先選擇音檔")
             return
+        if template_var.get() == TEMPLATE_CUSTOM:
+            format_spec = custom_template_text.get("1.0", "end").strip()
+            if not format_spec:
+                messagebox.showwarning("提醒", "請輸入自訂範本內容，或改選預設文件類型")
+                return
+        else:
+            format_spec = FORMAT_PRESETS[template_var.get()]
         result_row.pack_forget()
         lang_map = {"自動偵測": None, "中文 (zh)": "zh", "英文 (en)": "en"}
         task = PipelineTask(
             audio,
             lang_map.get(lang_var.get()),
             context_var.get(),
+            format_spec,
             on_status=lambda s: root.after(0, lambda: set_status(s, ACCENT)),
             on_done=on_done,
             on_error=on_error,
