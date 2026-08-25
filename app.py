@@ -131,8 +131,8 @@ def main() -> None:
 
     root = tk.Tk()
     root.title("會議錄音轉文字工具")
-    root.geometry("640x560")
-    root.minsize(640, 560)
+    root.geometry("640x600")
+    root.minsize(640, 480)
     root.configure(bg=BG)
 
     style = ttk.Style(root)
@@ -449,6 +449,17 @@ def main() -> None:
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
+
+    # ---- 依實際內容自動調整預設高度，避免底部按鈕被遮住 ----
+    root.update_idletasks()
+    content_w = frm.winfo_reqwidth() + 40
+    content_h = frm.winfo_reqheight() + 40
+    screen_h = root.winfo_screenheight()
+    win_w = max(640, content_w)
+    win_h = min(max(600, content_h), screen_h - 80)
+    root.geometry(f"{win_w}x{win_h}")
+    root.minsize(win_w, 480)
+
     root.mainloop()
 
 
