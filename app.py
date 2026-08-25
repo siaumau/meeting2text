@@ -30,6 +30,7 @@ from main import (
     summarize,
 )
 from export_word import export_docx
+from export_html import export_html
 
 
 def save_api_key(key: str) -> None:
@@ -120,12 +121,15 @@ class PipelineTask:
         minutes_path.write_text(minutes, encoding="utf-8")
         self.on_status("匯出 Word 中...")
         docx_path = export_docx(minutes_path, out_dir / f"{stem}_minutes.docx")
+        self.on_status("匯出美化 HTML 中...")
+        html_path = export_html(minutes_path, out_dir / f"{stem}_minutes.html")
 
         return {
             "out_dir": out_dir,
             "transcript": transcript_path,
             "minutes_md": minutes_path,
             "minutes_docx": docx_path,
+            "minutes_html": html_path,
         }
 
 
@@ -491,6 +495,11 @@ def main() -> None:
     btn_open = ttk.Button(result_row, text="📁 開啟輸出資料夾", style="Accent.TButton")
     btn_open.pack(fill="x", pady=(8, 0))
 
+    btn_open_html = ttk.Button(
+        result_row, text="🌐 開啟美化 HTML", style="Secondary.TButton"
+    )
+    btn_open_html.pack(fill="x", pady=(6, 0))
+
     # 路徑欄位本身也能直接點兩下開啟資料夾
     path_entry.bind("<Double-Button-1>", lambda _e: btn_open.invoke())
 
@@ -573,11 +582,13 @@ def main() -> None:
             set_status("完成！", SUCCESS)
             path_var.set(str(result["out_dir"]))
             btn_open.config(command=lambda: os.startfile(str(result["out_dir"])))
+            btn_open_html.config(command=lambda: os.startfile(str(result["minutes_html"])))
             result_row.pack(fill="x", pady=(10, 0))
             messagebox.showinfo(
                 "完成",
                 "文件已產生：\n\n"
-                f"{result['minutes_docx'].name}\n\n"
+                f"{result['minutes_docx'].name}\n"
+                f"{result['minutes_html'].name}\n\n"
                 f"輸出資料夾：\n{result['out_dir']}",
             )
 

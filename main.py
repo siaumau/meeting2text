@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
 
 from export_word import export_docx
+from export_html import export_html
 
 load_dotenv()
 
@@ -493,6 +494,10 @@ def main() -> None:
     docx_path = out_dir / f"{stem}_minutes.docx"
     export_docx(minutes_path, docx_path)
     print(f"  已匯出 Word：{docx_path}")
+
+    html_path = out_dir / f"{stem}_minutes.html"
+    export_html(minutes_path, html_path)
+    print(f"  已匯出 HTML：{html_path}")
 
     print("\n========== 會議紀錄 ==========\n")
     print(minutes)
