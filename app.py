@@ -263,9 +263,37 @@ def main() -> None:
             continue
         save_api_key(key.strip())
 
-    # ---- 版面 ----
-    frm = ttk.Frame(root, padding=20)
-    frm.pack(fill="both", expand=True)
+    # ---- 版面（外層用 Canvas + 捲軸包住，內容超出視窗高度時可以捲動，
+    #      並讓使用者透過捲軸看出下面還有沒有東西） ----
+    scroll_container = tk.Frame(root, bg=BG)
+    scroll_container.pack(fill="both", expand=True)
+
+    canvas = tk.Canvas(scroll_container, bg=BG, highlightthickness=0, bd=0)
+    vscroll = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vscroll.set)
+    # 捲軸固定顯示（不動態顯示/隱藏）：內容比視窗高時軸會出現拉桿讓使用者知道
+    # 下面還有東西可以捲；內容剛好放得下時拉桿會填滿整條軸，等於沒有更多內容。
+    canvas.pack(side="left", fill="both", expand=True)
+    vscroll.pack(side="right", fill="y")
+
+    frm = ttk.Frame(canvas, padding=20)
+    frm_window = canvas.create_window((0, 0), window=frm, anchor="nw")
+
+    def update_scrollregion(_event=None) -> None:
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
+    def on_canvas_resize(event) -> None:
+        canvas.itemconfig(frm_window, width=event.width)
+        update_scrollregion()
+
+    frm.bind("<Configure>", update_scrollregion)
+    canvas.bind("<Configure>", on_canvas_resize)
+
+    def on_mousewheel(event) -> None:
+        if vscroll.winfo_ismapped():
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    canvas.bind_all("<MouseWheel>", on_mousewheel)
 
     header = ttk.Frame(frm)
     header.pack(fill="x", pady=(0, 16))
@@ -333,13 +361,21 @@ def main() -> None:
     ).pack(anchor="w", pady=(4, 0))
     youtube_var.trace_add("write", lambda *_: refresh_start_state())
 
+    VIDEO_TEMPLATE = "影片重點整理"
+
     def toggle_source() -> None:
         if source_var.get() == "file":
             youtube_row.pack_forget()
             file_row.pack(fill="x", pady=(10, 0))
+            # 從 YouTube 切回本機音檔時，若使用者沒自己另外選過範本，改回預設會議紀錄
+            if template_var.get() == VIDEO_TEMPLATE:
+                template_var.set(DEFAULT_TEMPLATE)
         else:
             file_row.pack_forget()
             youtube_row.pack(fill="x", pady=(10, 0))
+            # 貼 YouTube 連結時，若使用者還停留在預設會議紀錄，自動改選更合理的影片範本
+            if template_var.get() == DEFAULT_TEMPLATE:
+                template_var.set(VIDEO_TEMPLATE)
         refresh_start_state()
 
     radio_file.config(command=toggle_source)
