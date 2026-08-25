@@ -118,10 +118,101 @@ def main() -> None:
     from tkinter import filedialog, messagebox, simpledialog, ttk
     from openai import OpenAI
 
+    BG = "#f4f5f9"
+    CARD = "#ffffff"
+    BORDER = "#e2e4ea"
+    TEXT = "#1f2430"
+    MUTED = "#8a8fa3"
+    ACCENT = "#4f46e5"
+    ACCENT_ACTIVE = "#4338ca"
+    ACCENT_DISABLED = "#c7c9e8"
+    SUCCESS = "#0a7d32"
+    ERROR = "#c62828"
+
     root = tk.Tk()
     root.title("會議錄音轉文字工具")
-    root.geometry("640x430")
-    root.resizable(False, False)
+    root.geometry("640x560")
+    root.minsize(640, 560)
+    root.configure(bg=BG)
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    style.configure("TFrame", background=BG)
+    style.configure("Card.TFrame", background=CARD)
+    style.configure("TLabel", background=BG, foreground=TEXT, font=("微軟正黑體", 10))
+    style.configure("Card.TLabel", background=CARD, foreground=TEXT, font=("微軟正黑體", 10))
+    style.configure(
+        "Title.TLabel", background=BG, foreground=TEXT, font=("微軟正黑體", 15, "bold")
+    )
+    style.configure(
+        "Subtitle.TLabel", background=BG, foreground=MUTED, font=("微軟正黑體", 9)
+    )
+    style.configure(
+        "Step.TLabel", background=CARD, foreground=ACCENT, font=("微軟正黑體", 9, "bold")
+    )
+    style.configure(
+        "Hint.TLabel", background=CARD, foreground=MUTED, font=("微軟正黑體", 8)
+    )
+    style.configure(
+        "Filename.TLabel", background=CARD, foreground=MUTED, font=("微軟正黑體", 9)
+    )
+
+    style.configure(
+        "Accent.TButton",
+        background=ACCENT,
+        foreground="white",
+        font=("微軟正黑體", 11, "bold"),
+        padding=(12, 10),
+        borderwidth=0,
+        focuscolor=ACCENT,
+    )
+    style.map(
+        "Accent.TButton",
+        background=[("disabled", ACCENT_DISABLED), ("active", ACCENT_ACTIVE)],
+        foreground=[("disabled", "#ffffff")],
+    )
+    style.configure(
+        "Secondary.TButton",
+        background="#eef0f6",
+        foreground=TEXT,
+        font=("微軟正黑體", 9),
+        padding=(10, 6),
+        borderwidth=0,
+    )
+    style.map("Secondary.TButton", background=[("active", "#e1e4ee")])
+    style.configure(
+        "Link.TButton",
+        background=BG,
+        foreground=MUTED,
+        font=("微軟正黑體", 8, "underline"),
+        padding=(0, 0),
+        borderwidth=0,
+        relief="flat",
+    )
+    style.map("Link.TButton", foreground=[("active", ACCENT)])
+
+    style.configure(
+        "Accent.Horizontal.TProgressbar", background=ACCENT, troughcolor="#eceefb"
+    )
+    style.configure(
+        "TCombobox",
+        fieldbackground="white",
+        background="white",
+        foreground=TEXT,
+        padding=6,
+    )
+    style.configure("TEntry", fieldbackground="white", padding=6)
+
+    def card(parent) -> ttk.Frame:
+        outer = tk.Frame(parent, bg=BORDER)
+        outer.pack(fill="x", pady=(0, 12))
+        inner = ttk.Frame(outer, style="Card.TFrame", padding=16)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        return inner
 
     state: dict[str, Path | None] = {"audio": None}
 
@@ -149,17 +240,34 @@ def main() -> None:
         save_api_key(key.strip())
 
     # ---- 版面 ----
-    frm = ttk.Frame(root, padding=16)
+    frm = ttk.Frame(root, padding=20)
     frm.pack(fill="both", expand=True)
 
+    header = ttk.Frame(frm)
+    header.pack(fill="x", pady=(0, 16))
+    ttk.Label(header, text="會議錄音轉文字工具", style="Title.TLabel").pack(anchor="w")
     ttk.Label(
-        frm, text="會議錄音轉文字 + 自動整理會議紀錄", font=("微軟正黑體", 14, "bold")
-    ).pack(anchor="w", pady=(0, 12))
+        header,
+        text="選擇錄音檔 → 自動轉文字 → AI 整理成會議紀錄與 Word 檔",
+        style="Subtitle.TLabel",
+    ).pack(anchor="w", pady=(2, 0))
 
-    row1 = ttk.Frame(frm)
-    row1.pack(fill="x", pady=4)
-    lbl_file = ttk.Label(row1, text="尚未選擇音檔", foreground="#666")
-    btn_pick = ttk.Button(row1, text="選擇音檔")
+    # ---- STEP 1：選擇音檔 ----
+    c1 = card(frm)
+    ttk.Label(c1, text="STEP 1　選擇會議錄音檔", style="Step.TLabel").pack(anchor="w")
+
+    file_row = ttk.Frame(c1, style="Card.TFrame")
+    file_row.pack(fill="x", pady=(10, 0))
+    lbl_file = ttk.Label(
+        file_row,
+        text="尚未選擇檔案",
+        style="Filename.TLabel",
+        wraplength=420,
+        justify="left",
+    )
+    lbl_file.pack(side="left", fill="x", expand=True, padx=(0, 12))
+    btn_pick = ttk.Button(file_row, text="📂 選擇音檔", style="Secondary.TButton")
+    btn_pick.pack(side="right")
 
     def pick_file() -> None:
         path = filedialog.askopenfilename(
@@ -174,57 +282,67 @@ def main() -> None:
         )
         if path:
             state["audio"] = Path(path)
-            lbl_file.config(text=path, foreground="#000")
+            lbl_file.config(text=path, foreground=TEXT)
+            refresh_start_state()
 
     btn_pick.config(command=pick_file)
 
-    row2 = ttk.Frame(frm)
-    row2.pack(fill="x", pady=4)
-    ttk.Label(row2, text="語言：").pack(side="left")
+    # ---- STEP 2：選項 ----
+    c2 = card(frm)
+    ttk.Label(c2, text="STEP 2　設定選項（選填）", style="Step.TLabel").pack(anchor="w")
+
+    opt_row = ttk.Frame(c2, style="Card.TFrame")
+    opt_row.pack(fill="x", pady=(10, 0))
+    ttk.Label(opt_row, text="語言", style="Card.TLabel").pack(side="left")
     lang_var = tk.StringVar(value="自動偵測")
     lang_box = ttk.Combobox(
-        row2,
+        opt_row,
         textvariable=lang_var,
         state="readonly",
         width=12,
         values=["自動偵測", "中文 (zh)", "英文 (en)"],
     )
+    lang_box.pack(side="left", padx=(10, 0))
 
-    progress = ttk.Progressbar(frm, mode="indeterminate")
-    lbl_status = ttk.Label(frm, text="就緒", foreground="#333", wraplength=580)
-    btn_open = ttk.Button(frm, text="開啟輸出資料夾", state="disabled")
-    btn_start = ttk.Button(frm, text="開始轉換")
-
-    row1.pack_configure(pady=8)
-    lbl_file.pack(side="left", fill="x", expand=True, padx=(0, 8))
-    btn_pick.pack(side="right")
-
-    lang_box.pack(side="left")
-    row2.pack(pady=4)
-
-    row3 = ttk.Frame(frm)
-    row3.pack(fill="x", pady=(8, 4))
-    ttk.Label(row3, text="補充提示詞（產業別／專有名詞，選填）：").pack(anchor="w")
+    ttk.Label(c2, text="補充提示詞（產業別／專有名詞）", style="Card.TLabel").pack(
+        anchor="w", pady=(14, 0)
+    )
     context_var = tk.StringVar()
-    context_entry = ttk.Entry(row3, textvariable=context_var)
-    context_entry.pack(fill="x", pady=(4, 0))
+    context_entry = ttk.Entry(c2, textvariable=context_var)
+    context_entry.pack(fill="x", pady=(6, 0))
     ttk.Label(
-        row3,
+        c2,
         text="例如：半導體產業、蝕刻機台、良率、公司內部代號等，可提升辨識與整理的用詞準確度",
-        foreground="#888",
-        font=("微軟正黑體", 8),
-    ).pack(anchor="w")
+        style="Hint.TLabel",
+    ).pack(anchor="w", pady=(4, 0))
 
-    progress.pack(fill="x", pady=(18, 6))
-    lbl_status.pack(anchor="w")
-    btn_start.pack(pady=(14))
-    btn_open.pack()
+    # ---- STEP 3：開始 ----
+    c3 = card(frm)
+    ttk.Label(c3, text="STEP 3　開始轉換", style="Step.TLabel").pack(anchor="w")
 
-    # ---- API Key 狀態列 ----
+    btn_start = ttk.Button(c3, text="▶  開始轉換", style="Accent.TButton", state="disabled")
+    btn_start.pack(fill="x", pady=(10, 10))
+
+    progress = ttk.Progressbar(c3, mode="indeterminate", style="Accent.Horizontal.TProgressbar")
+
+    status_row = ttk.Frame(c3, style="Card.TFrame")
+    status_row.pack(fill="x", pady=(4, 0))
+    lbl_status_dot = tk.Label(status_row, text="●", fg=MUTED, bg=CARD, font=("Arial", 10))
+    lbl_status_dot.pack(side="left")
+    lbl_status = ttk.Label(status_row, text="就緒，請先選擇音檔", style="Card.TLabel")
+    lbl_status.pack(side="left", padx=(6, 0))
+
+    result_row = ttk.Frame(c3, style="Card.TFrame")
+    btn_open = ttk.Button(result_row, text="📁 開啟輸出資料夾", style="Secondary.TButton")
+
+    def refresh_start_state() -> None:
+        btn_start.config(state="normal" if state["audio"] else "disabled")
+
+    # ---- API Key 狀態列（頁尾，弱化處理） ----
     row_key = ttk.Frame(frm)
-    row_key.pack(fill="x", pady=(16, 0))
-    lbl_key = ttk.Label(row_key, foreground="#666")
-    btn_reset_key = ttk.Button(row_key, text="重新設定 API Key")
+    row_key.pack(fill="x", pady=(4, 0))
+    lbl_key = ttk.Label(row_key, style="Subtitle.TLabel")
+    btn_reset_key = ttk.Button(row_key, text="重新設定 API Key", style="Link.TButton")
 
     def masked_key() -> str:
         key = os.getenv("GROQ_API_KEY", "")
@@ -264,22 +382,28 @@ def main() -> None:
     btn_reset_key.pack(side="right")
     refresh_key_label()
 
+    def set_status(text: str, color: str = MUTED) -> None:
+        lbl_status.config(text=text)
+        lbl_status_dot.config(fg=color)
+
     def set_busy(busy: bool) -> None:
         if busy:
+            progress.pack(fill="x", pady=(0, 10), before=status_row)
             progress.start(12)
         else:
             progress.stop()
-        btn_start.config(state="disabled" if busy else "normal")
+            progress.pack_forget()
+        btn_start.config(state="disabled" if busy else ("normal" if state["audio"] else "disabled"))
         btn_pick.config(state="disabled" if busy else "normal")
         context_entry.config(state="disabled" if busy else "normal")
+        lang_box.config(state="disabled" if busy else "readonly")
 
     def on_done(result: dict) -> None:
         def ui():
             set_busy(False)
-            lbl_status.config(text="完成！", foreground="#0a7d32")
-            btn_open.config(
-                state="normal", command=lambda: os.startfile(str(result["out_dir"]))
-            )
+            set_status("完成！", SUCCESS)
+            btn_open.config(command=lambda: os.startfile(str(result["out_dir"])))
+            result_row.pack(fill="x", pady=(10, 0))
             messagebox.showinfo(
                 "完成",
                 "會議紀錄已產生：\n\n"
@@ -295,7 +419,7 @@ def main() -> None:
             msg = str(e)
             if isinstance(e, AuthenticationError):
                 msg = "API Key 無效或已過期，請刪除程式旁的 .env 後重新設定。"
-            lbl_status.config(text="失敗", foreground="#b3261e")
+            set_status("失敗，請查看錯誤訊息", ERROR)
             messagebox.showerror("發生錯誤", msg[:1500])
 
         root.after(0, ui)
@@ -305,17 +429,18 @@ def main() -> None:
         if audio is None:
             messagebox.showwarning("提醒", "請先選擇音檔")
             return
+        result_row.pack_forget()
         lang_map = {"自動偵測": None, "中文 (zh)": "zh", "英文 (en)": "en"}
         task = PipelineTask(
             audio,
             lang_map.get(lang_var.get()),
             context_var.get(),
-            on_status=lambda s: root.after(0, lambda: lbl_status.config(text=s)),
+            on_status=lambda s: root.after(0, lambda: set_status(s, ACCENT)),
             on_done=on_done,
             on_error=on_error,
         )
         set_busy(True)
-        lbl_status.config(text="處理中...", foreground="#333")
+        set_status("處理中...", ACCENT)
         task.start()
 
     btn_start.config(command=start)
