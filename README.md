@@ -28,6 +28,35 @@ STEP 1 可以切換「📂 本機音檔」或「🔗 YouTube 連結」。選 You
 - CLI 版對應 `--youtube <網址>`，與音檔路徑參數擇一使用。
 - 僅供個人筆記整理使用；請勿用來下載受著作權保護、非公開或會員限定的內容。
 
+## 依時間分段處理（長錄音逐段調整 → 合併完整報告）
+
+長錄音可以在 STEP 2 勾選「依時間分段處理，每段 N 分鐘」。例如 65 分鐘、每段 10 分鐘，會切成 7 段（最後一段 5 分鐘），每段各自輸出：
+
+- `partNN.opus`：該段音檔（每段往後多切 5 秒重疊，避免切在句子中間）
+- `partNN_transcript.txt`：該段逐字稿
+- `partNN_minutes.md / .docx / .html`：該段整理文件（標題下方標註時段）
+
+全部放在 `<輸出資料夾>/<檔名>_segments/`，進度與每段提示詞記錄在 `segments.json`。處理完會自動開啟「分段管理」視窗，也可以之後用 STEP 3 的「📂 開啟既有分段專案」重新開啟繼續調整：
+
+1. **檢查**：選一段 → 播放音檔／檢視逐字稿／開啟該段文件。
+2. **💡 AI 建議提示詞**：AI 讀該段逐字稿，列出疑似同音誤植（例如「單判 → 單價」）、推測產業，以及建議補充的提示詞；可增刪後「套用並重新辨識此段」。
+3. **✏ 設定本段提示詞**：每段可以有自己的提示詞，會跟 STEP 2 的全域提示詞合併使用。
+4. **🔁 重新辨識並整理**：用新提示詞重跑該段語音辨識（會覆蓋該段逐字稿）。
+5. **🔄 只重新整理**：直接手動修正 `partNN_transcript.txt` 存檔後按這個，沿用修正後的逐字稿只重新整理文件。
+6. **📑 合併產生完整報告**：用各段（修正過的）逐字稿依時間順序重新整理，輸出 `<檔名>_full_report.md / .docx / .html`，每個重點後面會標註出處時段，例如（10:00–20:00）。
+
+> Whisper 提示詞只能「引導」辨識，不保證每個詞都會改對；重要的專有名詞若重跑後仍錯，直接手動修正逐字稿再按「只重新整理」最可靠。
+
+CLI 版：
+
+```bash
+python main.py 會議.m4a --segment-minutes 10 --context "產業提示詞"        # 切段並處理全部段落
+python main.py --segments-dir output/會議_segments --suggest 2              # AI 建議第 2 段提示詞
+python main.py --segments-dir output/會議_segments --redo 2 --segment-context "單價、過補單"   # 用新提示詞重跑第 2 段
+python main.py --segments-dir output/會議_segments --redo 2 --keep-transcript # 沿用手動修正的逐字稿只重新整理
+python main.py --segments-dir output/會議_segments --merge                  # 合併產生完整報告
+```
+
 ## 輸出文件類型（可選預設範本或自訂）
 
 STEP 2 新增「輸出文件類型」下拉選單，決定整理出來的文件結構長什麼樣子：

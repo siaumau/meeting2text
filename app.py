@@ -31,6 +31,15 @@ from main import (
 )
 from export_word import export_docx
 from export_html import export_html
+from segments import (
+    SegmentWorkspace,
+    format_suggestions,
+    join_terms,
+    merge_report,
+    process_segment,
+    run_all_segments,
+    suggest_terms,
+)
 
 
 def save_api_key(key: str) -> None:
@@ -54,8 +63,10 @@ class PipelineTask:
         on_status,
         on_done,
         on_error,
+        segment_minutes: float | None = None,
     ):
         self.source_kind = source_kind  # "file" or "youtube"
+        self.segment_minutes = segment_minutes
         self.source_value = source_value
         self.language = language
         self.context = context
@@ -90,6 +101,19 @@ class PipelineTask:
             stem = audio_path.stem
 
         out_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.segment_minutes:
+            ws = SegmentWorkspace.open_or_create(
+                audio_path,
+                out_dir / f"{stem}_segments",
+                stem,
+                self.segment_minutes,
+                self.language,
+                self.context,
+            )
+            run_all_segments(client, ws, self.format_spec, status=self.on_status)
+            return {"out_dir": ws.root, "workspace": ws}
+
         transcript_path = out_dir / f"{stem}_transcript.txt"
 
         if transcript_path.exists():
@@ -455,12 +479,36 @@ def main() -> None:
         style="Hint.TLabel",
     ).pack(anchor="w", pady=(4, 0))
 
+    segment_row = ttk.Frame(c2, style="Card.TFrame")
+    segment_row.pack(fill="x", pady=(14, 0))
+    segment_var = tk.BooleanVar(value=False)
+    segment_check = ttk.Checkbutton(
+        segment_row, text="依時間分段處理，每段", variable=segment_var
+    )
+    segment_check.pack(side="left")
+    segment_minutes_var = tk.StringVar(value="10")
+    segment_spin = ttk.Spinbox(
+        segment_row, from_=1, to=60, width=4, textvariable=segment_minutes_var
+    )
+    segment_spin.pack(side="left", padx=(6, 6))
+    ttk.Label(segment_row, text="分鐘", style="Card.TLabel").pack(side="left")
+    ttk.Label(
+        c2,
+        text="長錄音建議勾選：每段各自輸出音檔、逐字稿與文件，可逐段補提示詞重跑，確認後再合併成完整報告",
+        style="Hint.TLabel",
+    ).pack(anchor="w", pady=(4, 0))
+
     # ---- STEP 3：開始 ----
     c3 = card(frm)
     ttk.Label(c3, text="STEP 3　開始轉換", style="Step.TLabel").pack(anchor="w")
 
     btn_start = ttk.Button(c3, text="▶  開始轉換", style="Accent.TButton", state="disabled")
     btn_start.pack(fill="x", pady=(10, 10))
+
+    btn_open_project = ttk.Button(
+        c3, text="📂 開啟既有分段專案（繼續調整／合併報告）", style="Secondary.TButton"
+    )
+    btn_open_project.pack(fill="x", pady=(0, 10))
 
     progress = ttk.Progressbar(c3, mode="indeterminate", style="Accent.Horizontal.TProgressbar")
 
@@ -575,10 +623,353 @@ def main() -> None:
         lang_box.config(state="disabled" if busy else "readonly")
         template_box.config(state="disabled" if busy else "readonly")
         custom_template_text.config(state="disabled" if busy else "normal")
+        segment_check.config(state="disabled" if busy else "normal")
+        segment_spin.config(state="disabled" if busy else "normal")
+        btn_open_project.config(state="disabled" if busy else "normal")
+
+    def current_format_spec() -> str | None:
+        if template_var.get() == TEMPLATE_CUSTOM:
+            spec = custom_template_text.get("1.0", "end").strip()
+            if not spec:
+                messagebox.showwarning("提醒", "請輸入自訂範本內容，或改選預設文件類型")
+                return None
+            return spec
+        return FORMAT_PRESETS[template_var.get()]
+
+    # ---- 分段管理視窗：逐段檢查、補提示詞重跑、合併完整報告 ----
+    def open_segment_manager(ws: SegmentWorkspace) -> None:
+        win = tk.Toplevel(root)
+        win.title(f"分段管理 - {ws.stem}")
+        win.geometry("860x560")
+        win.configure(bg=BG)
+        if icon_path.exists():
+            try:
+                win.iconbitmap(str(icon_path))
+            except tk.TclError:
+                pass
+
+        body = ttk.Frame(win, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"分段管理：{ws.stem}", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            body,
+            text=(
+                f"共 {ws.total} 段，每段 {ws.data.get('segment_minutes', 0):g} 分鐘。"
+                "選一段 → 檢查逐字稿／文件 → 用詞不準就補提示詞重跑 → 全部確認後合併完整報告"
+            ),
+            style="Subtitle.TLabel",
+        ).pack(anchor="w", pady=(2, 10))
+
+        columns = ("index", "time", "status", "context")
+        tree = ttk.Treeview(body, columns=columns, show="headings", height=10)
+        for col, title, width in (
+            ("index", "段", 50),
+            ("time", "時段", 140),
+            ("status", "狀態", 150),
+            ("context", "本段提示詞", 420),
+        ):
+            tree.heading(col, text=title)
+            tree.column(col, width=width, anchor="w" if col == "context" else "center")
+        tree.pack(fill="both", expand=True)
+
+        def seg_status(seg: dict) -> str:
+            if not ws.transcript_path(seg).exists():
+                return "未轉文字"
+            if not ws.minutes_path(seg).exists():
+                return "已轉文字，未整理"
+            if seg.get("transcribed_with", "") != ws.effective_context(seg):
+                return "提示詞已改，待重跑"
+            return "完成"
+
+        def refresh_tree() -> None:
+            selected = tree.selection()
+            tree.delete(*tree.get_children())
+            for seg in ws.segments:
+                tree.insert(
+                    "",
+                    "end",
+                    iid=str(seg["index"]),
+                    values=(
+                        seg["index"],
+                        ws.label(seg),
+                        seg_status(seg),
+                        seg.get("context", ""),
+                    ),
+                )
+            if selected and tree.exists(selected[0]):
+                tree.selection_set(selected[0])
+
+        def selected_index() -> int | None:
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("提醒", "請先在列表中選一段", parent=win)
+                return None
+            return int(sel[0])
+
+        seg_buttons: list[ttk.Button] = []
+
+        def seg_button(parent, text: str, command, style_name="Secondary.TButton"):
+            btn = ttk.Button(parent, text=text, style=style_name, command=command)
+            seg_buttons.append(btn)
+            return btn
+
+        mgr_status = ttk.Label(body, text="就緒", style="Subtitle.TLabel")
+        mgr_progress = ttk.Progressbar(
+            body, mode="indeterminate", style="Accent.Horizontal.TProgressbar"
+        )
+
+        def run_bg(label: str, work, on_success=None) -> None:
+            """在背景執行耗時工作（API 呼叫），期間停用所有按鈕。"""
+            for b in seg_buttons:
+                b.config(state="disabled")
+            mgr_progress.pack(fill="x", pady=(8, 0), before=mgr_status)
+            mgr_progress.start(12)
+            mgr_status.config(text=label, foreground=ACCENT)
+
+            def status(msg: str) -> None:
+                win.after(0, lambda: mgr_status.config(text=msg, foreground=ACCENT))
+
+            def finish(ok: bool, payload) -> None:
+                mgr_progress.stop()
+                mgr_progress.pack_forget()
+                for b in seg_buttons:
+                    b.config(state="normal")
+                refresh_tree()
+                if ok:
+                    mgr_status.config(text="完成", foreground=SUCCESS)
+                    if on_success:
+                        on_success(payload)
+                else:
+                    msg = str(payload)
+                    if isinstance(payload, AuthenticationError):
+                        msg = "API Key 無效或已過期，請重新設定。"
+                    mgr_status.config(text="失敗，請查看錯誤訊息", foreground=ERROR)
+                    messagebox.showerror("發生錯誤", msg[:1500], parent=win)
+
+            def worker() -> None:
+                try:
+                    result = work(get_client(), status)
+                    win.after(0, lambda r=result: finish(True, r))
+                except Exception as e:
+                    traceback.print_exc()
+                    win.after(0, lambda err=e: finish(False, err))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def open_file(path: Path) -> None:
+            if not path.exists():
+                messagebox.showwarning("提醒", f"檔案還不存在：\n{path.name}", parent=win)
+                return
+            os.startfile(str(path))
+
+        def play_audio() -> None:
+            idx = selected_index()
+            if idx:
+                open_file(ws.audio_path(ws.seg(idx)))
+
+        def edit_transcript() -> None:
+            idx = selected_index()
+            if idx:
+                open_file(ws.transcript_path(ws.seg(idx)))
+
+        def open_seg_html() -> None:
+            idx = selected_index()
+            if idx:
+                open_file(ws.minutes_path(ws.seg(idx)).with_suffix(".html"))
+
+        def rerun(idx: int, retranscribe: bool) -> None:
+            spec = current_format_spec()
+            if spec is None:
+                return
+            if retranscribe and not messagebox.askyesno(
+                "重新辨識",
+                f"將用目前的提示詞重新辨識第 {idx} 段，\n"
+                "該段逐字稿（含你手動修改過的內容）會被覆蓋，確定嗎？",
+                parent=win,
+            ):
+                return
+            run_bg(
+                f"處理第 {idx} 段中...",
+                lambda client, status: process_segment(
+                    client, ws, idx, spec, retranscribe=retranscribe, status=status
+                ),
+            )
+
+        def rerun_selected(retranscribe: bool) -> None:
+            idx = selected_index()
+            if idx:
+                rerun(idx, retranscribe)
+
+        def edit_context() -> None:
+            idx = selected_index()
+            if not idx:
+                return
+            seg = ws.seg(idx)
+            value = simpledialog.askstring(
+                "本段提示詞",
+                f"第 {idx} 段（{ws.label(seg)}）專用的補充提示詞\n"
+                "（會與全域提示詞合併使用，以「、」分隔）",
+                initialvalue=seg.get("context", ""),
+                parent=win,
+            )
+            if value is None:
+                return
+            ws.set_segment_context(idx, value)
+            refresh_tree()
+            if messagebox.askyesno(
+                "已儲存", "提示詞已儲存，要現在用新提示詞重新辨識這一段嗎？", parent=win
+            ):
+                rerun(idx, retranscribe=True)
+
+        def show_suggestions(idx: int, result: dict) -> None:
+            seg = ws.seg(idx)
+            dlg = tk.Toplevel(win)
+            dlg.title(f"AI 建議提示詞 - 第 {idx} 段")
+            dlg.geometry("620x440")
+            dlg.configure(bg=BG)
+            dlg.transient(win)
+            box = ttk.Frame(dlg, padding=16)
+            box.pack(fill="both", expand=True)
+            ttk.Label(box, text=f"第 {idx} 段（{ws.label(seg)}）分析結果", style="TLabel").pack(
+                anchor="w"
+            )
+            text = tk.Text(
+                box, height=12, wrap="word", font=("微軟正黑體", 10), bg="white", fg=TEXT
+            )
+            text.insert("1.0", format_suggestions(result))
+            text.config(state="disabled")
+            text.pack(fill="both", expand=True, pady=(6, 10))
+            ttk.Label(box, text="本段提示詞（可自行增刪後套用）", style="TLabel").pack(anchor="w")
+            ctx_var = tk.StringVar(
+                value=join_terms(seg.get("context", ""), "、".join(result["terms"]))
+            )
+            ttk.Entry(box, textvariable=ctx_var).pack(fill="x", pady=(4, 10))
+            btns = ttk.Frame(box)
+            btns.pack(fill="x")
+
+            def apply(then_rerun: bool) -> None:
+                ws.set_segment_context(idx, ctx_var.get())
+                refresh_tree()
+                dlg.destroy()
+                if then_rerun:
+                    rerun(idx, retranscribe=True)
+
+            ttk.Button(
+                btns,
+                text="套用並重新辨識此段",
+                style="Accent.TButton",
+                command=lambda: apply(True),
+            ).pack(side="left")
+            ttk.Button(
+                btns, text="只套用", style="Secondary.TButton", command=lambda: apply(False)
+            ).pack(side="left", padx=(8, 0))
+            ttk.Button(
+                btns, text="取消", style="Secondary.TButton", command=dlg.destroy
+            ).pack(side="right")
+
+        def suggest() -> None:
+            idx = selected_index()
+            if not idx:
+                return
+            run_bg(
+                f"AI 分析第 {idx} 段用詞中...",
+                lambda client, status: suggest_terms(client, ws, idx, status=status),
+                on_success=lambda result: show_suggestions(idx, result),
+            )
+
+        def merge() -> None:
+            spec = current_format_spec()
+            if spec is None:
+                return
+            pending = [
+                s["index"] for s in ws.segments if seg_status(s) not in ("完成", "已轉文字，未整理")
+            ]
+            if pending and not messagebox.askyesno(
+                "確認合併",
+                f"第 {pending} 段尚未轉文字或提示詞改過還沒重跑，仍要直接合併嗎？",
+                parent=win,
+            ):
+                return
+
+            def done(paths: dict) -> None:
+                btn_report.config(command=lambda: open_file(paths["html"]))
+                if messagebox.askyesno(
+                    "完成",
+                    f"完整報告已產生：\n\n{paths['docx'].name}\n{paths['html'].name}\n\n要開啟 HTML 報告嗎？",
+                    parent=win,
+                ):
+                    open_file(paths["html"])
+
+            run_bg(
+                "合併完整報告中...",
+                lambda client, status: merge_report(client, ws, spec, status=status),
+                on_success=done,
+            )
+
+        row1 = ttk.Frame(body)
+        row1.pack(fill="x", pady=(10, 0))
+        seg_button(row1, "▶ 播放本段音檔", play_audio).pack(side="left")
+        seg_button(row1, "📝 檢視／修正逐字稿", edit_transcript).pack(side="left", padx=(6, 0))
+        seg_button(row1, "🌐 開啟本段文件", open_seg_html).pack(side="left", padx=(6, 0))
+
+        row2 = ttk.Frame(body)
+        row2.pack(fill="x", pady=(6, 0))
+        seg_button(row2, "💡 AI 建議提示詞", suggest).pack(side="left")
+        seg_button(row2, "✏ 設定本段提示詞", edit_context).pack(side="left", padx=(6, 0))
+        seg_button(row2, "🔁 重新辨識並整理", lambda: rerun_selected(True)).pack(
+            side="left", padx=(6, 0)
+        )
+        seg_button(row2, "🔄 只重新整理（沿用修正後逐字稿）", lambda: rerun_selected(False)).pack(
+            side="left", padx=(6, 0)
+        )
+
+        row3 = ttk.Frame(body)
+        row3.pack(fill="x", pady=(12, 0))
+        seg_button(row3, "📑 合併產生完整報告", merge, "Accent.TButton").pack(
+            side="left", fill="x", expand=True
+        )
+        btn_report = seg_button(
+            row3, "🌐 開啟完整報告", lambda: open_file(ws.report_path().with_suffix(".html"))
+        )
+        btn_report.pack(side="left", padx=(6, 0))
+        seg_button(row3, "📁 開啟資料夾", lambda: os.startfile(str(ws.root))).pack(
+            side="left", padx=(6, 0)
+        )
+
+        mgr_status.pack(anchor="w", pady=(8, 0))
+        tree.bind("<Double-Button-1>", lambda _e: edit_transcript())
+        refresh_tree()
+        if ws.segments:
+            tree.selection_set("1")
+
+    def open_project() -> None:
+        path = filedialog.askdirectory(title="選擇分段專案資料夾（檔名_segments）")
+        if not path:
+            return
+        try:
+            ws = SegmentWorkspace.load(Path(path))
+        except Exception as e:
+            messagebox.showerror("無法開啟", str(e))
+            return
+        open_segment_manager(ws)
+
+    btn_open_project.config(command=open_project)
 
     def on_done(result: dict) -> None:
         def ui():
             set_busy(False)
+            if "workspace" in result:
+                set_status("分段處理完成！請在分段管理視窗逐段檢查", SUCCESS)
+                path_var.set(str(result["out_dir"]))
+                btn_open.config(command=lambda: os.startfile(str(result["out_dir"])))
+                btn_open_html.config(
+                    command=lambda: open_segment_manager(result["workspace"])
+                )
+                btn_open_html.config(text="🧩 開啟分段管理")
+                result_row.pack(fill="x", pady=(10, 0))
+                open_segment_manager(result["workspace"])
+                return
+            btn_open_html.config(text="🌐 開啟美化 HTML")
             set_status("完成！", SUCCESS)
             path_var.set(str(result["out_dir"]))
             btn_open.config(command=lambda: os.startfile(str(result["out_dir"])))
@@ -619,13 +1010,18 @@ def main() -> None:
                 return
             source_kind, source_value = "file", audio
 
-        if template_var.get() == TEMPLATE_CUSTOM:
-            format_spec = custom_template_text.get("1.0", "end").strip()
-            if not format_spec:
-                messagebox.showwarning("提醒", "請輸入自訂範本內容，或改選預設文件類型")
+        format_spec = current_format_spec()
+        if format_spec is None:
+            return
+        segment_minutes = None
+        if segment_var.get():
+            try:
+                segment_minutes = float(segment_minutes_var.get())
+            except ValueError:
+                segment_minutes = 0
+            if not 1 <= segment_minutes <= 60:
+                messagebox.showwarning("提醒", "分段長度請輸入 1~60 分鐘")
                 return
-        else:
-            format_spec = FORMAT_PRESETS[template_var.get()]
         result_row.pack_forget()
         lang_map = {"自動偵測": None, "中文 (zh)": "zh", "英文 (en)": "en"}
         task = PipelineTask(
@@ -637,6 +1033,7 @@ def main() -> None:
             on_status=lambda s: root.after(0, lambda: set_status(s, ACCENT)),
             on_done=on_done,
             on_error=on_error,
+            segment_minutes=segment_minutes,
         )
         set_busy(True)
         set_status("處理中...", ACCENT)

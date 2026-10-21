@@ -330,11 +330,21 @@ def split_transcript(transcript: str, limit: int = CHUNK_CHAR_LIMIT) -> list[str
 
 
 def call_llm(
-    client: OpenAI, system: str, user: str, max_tokens: int = 1024, retries: int = 3
+    client: OpenAI,
+    system: str,
+    user: str,
+    max_tokens: int = 1024,
+    retries: int = 3,
+    reasoning_effort: str | None = None,
 ) -> str:
+    # gpt-oss 是推理模型，推理過程也會吃 max_tokens；需要較長結構化輸出時可調低推理強度
+    extra: dict[str, Any] = {}
+    if reasoning_effort:
+        extra["reasoning_effort"] = reasoning_effort
     for attempt in range(retries):
         try:
             resp = client.chat.completions.create(
+                **extra,
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": system},
@@ -357,11 +367,13 @@ def summarize(
     transcript: str,
     context: str | None = None,
     format_spec: str | None = None,
+    chunks: list[str] | None = None,
 ) -> str:
     system = "你是一位擅長整理文件的助理，輸出簡潔、條理分明的繁體中文。"
     context_block = build_context_block(context)
     format_spec = format_spec or FORMAT_PRESETS[DEFAULT_TEMPLATE]
-    chunks = split_transcript(transcript)
+    # 呼叫端可自行預先切好段落（例如合併分段報告時，讓每段都帶著時間標記）
+    chunks = chunks or split_transcript(transcript)
 
     if len(chunks) == 1:
         print(f"[2/2] 使用 {LLM_MODEL} 整理文件中 ...")
@@ -421,6 +433,59 @@ def summarize(
     )
 
 
+def run_segments_cli(
+    args: argparse.Namespace, format_spec: str, audio_path: Path | None, stem: str
+) -> None:
+    from segments import (
+        SegmentWorkspace,
+        format_suggestions,
+        merge_report,
+        process_segment,
+        run_all_segments,
+        suggest_terms,
+    )
+
+    if args.segments_dir:
+        ws = SegmentWorkspace.load(Path(args.segments_dir))
+        if args.context is not None:
+            ws.data["context"] = args.context
+        if args.language:
+            ws.data["language"] = args.language
+        ws.save()
+    else:
+        assert audio_path is not None
+        ws = SegmentWorkspace.open_or_create(
+            audio_path,
+            Path("output") / f"{stem}_segments",
+            stem,
+            args.segment_minutes,
+            args.language,
+            args.context,
+        )
+    print(f"分段專案：{ws.root}（共 {ws.total} 段）")
+    client = get_client()
+
+    if args.redo:
+        if args.segment_context is not None:
+            ws.set_segment_context(args.redo, args.segment_context)
+        paths = process_segment(
+            client, ws, args.redo, format_spec, retranscribe=not args.keep_transcript
+        )
+        print(f"  第 {args.redo} 段已更新：{paths['md']}")
+    if args.suggest:
+        print(format_suggestions(suggest_terms(client, ws, args.suggest)))
+    if not args.redo and not args.suggest:
+        run_all_segments(client, ws, format_spec)
+        print("\n各段結果：")
+        for seg in ws.segments:
+            print(f"  第 {seg['index']} 段 {ws.label(seg)}：{ws.minutes_path(seg).name}")
+    if args.merge:
+        paths = merge_report(client, ws, format_spec)
+        print("\n完整報告：")
+        for path in paths.values():
+            print(f"  {path}")
+
+
 def main() -> None:
     out: Any = sys.stdout
     err: Any = sys.stderr
@@ -453,13 +518,43 @@ def main() -> None:
         action="store_true",
         help="若 output 已有同名逐字稿則跳過轉文字步驟",
     )
+    seg_group = parser.add_argument_group("分段處理（長錄音依時間切段，逐段調整後再合併）")
+    seg_group.add_argument(
+        "--segment-minutes",
+        type=float,
+        help="每段幾分鐘，例如 10：65 分鐘錄音會切成 7 段，各自輸出逐字稿與整理文件",
+    )
+    seg_group.add_argument(
+        "--segments-dir", help="開啟既有的分段專案資料夾（<檔名>_segments），不需再給音檔"
+    )
+    seg_group.add_argument("--redo", type=int, metavar="N", help="重新處理第 N 段")
+    seg_group.add_argument(
+        "--segment-context",
+        help="搭配 --redo：設定第 N 段專用的補充提示詞（會與 --context 合併使用並記錄下來）",
+    )
+    seg_group.add_argument(
+        "--keep-transcript",
+        action="store_true",
+        help="搭配 --redo：不重新辨識，沿用（已手動修正的）逐字稿只重新整理",
+    )
+    seg_group.add_argument(
+        "--suggest", type=int, metavar="N", help="讓 AI 分析第 N 段逐字稿，建議要補充的提示詞"
+    )
+    seg_group.add_argument(
+        "--merge", action="store_true", help="用各段逐字稿重新整理出一份完整報告"
+    )
     args = parser.parse_args()
     format_spec = args.custom_template or FORMAT_PRESETS[args.template]
+
+    out_dir = Path("output")
+
+    if args.segments_dir:
+        run_segments_cli(args, format_spec, None, "")
+        return
 
     if not args.youtube and not args.audio:
         sys.exit("錯誤：請提供音檔路徑，或使用 --youtube 指定影片網址")
 
-    out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
 
     if args.youtube:
@@ -472,6 +567,10 @@ def main() -> None:
         if not audio_path.exists():
             sys.exit(f"錯誤：找不到檔案 {audio_path}")
         stem = audio_path.stem
+
+    if args.segment_minutes:
+        run_segments_cli(args, format_spec, audio_path, stem)
+        return
 
     client = get_client()
     transcript_path = out_dir / f"{stem}_transcript.txt"
